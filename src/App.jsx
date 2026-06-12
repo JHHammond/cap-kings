@@ -625,15 +625,19 @@ function playPlayoffGame(roster, chemistry, oppLevel) {
 }
 
 /* ============================ COMPONENTS ============================ */
-function Avatar({ player, failed, onFail }) {
-  const showPhoto = player.espnId && !failed;
-  if (showPhoto) {
-    return <div className="ava"><img src={`https://a.espncdn.com/i/headshots/nfl/players/full/${player.espnId}.png`} alt={player.name} loading="lazy" onError={onFail} /></div>;
-  }
+function Avatar({ player }) {
   const col = TC[player.team] || "#3A3F4A";
+
   return (
-    <div className="ava legend" style={{ background: `linear-gradient(180deg, ${col} 0%, ${col}CC 55%, ${col}88 100%)` }}>
-      <div className="ava-shine" /><span className="ava-num">{player.jersey}</span><span className="ava-team">{player.team}</span>
+    <div
+      className="ava legend"
+      style={{
+        background: `linear-gradient(180deg, ${col} 0%, ${col}CC 55%, ${col}88 100%)`,
+      }}
+    >
+      <div className="ava-shine" />
+      <span className="ava-num">{player.jersey}</span>
+      <span className="ava-team">{player.team}</span>
     </div>
   );
 }
