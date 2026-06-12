@@ -817,6 +817,14 @@ export default function CapKings() {
     try { localStorage.setItem("capKingsCareer", JSON.stringify(career)); } catch {}
   }, [career]);
 
+  // Kill white gutters on the host page — inject dark bg into real <html>/<body>
+  useEffect(() => {
+    document.body.style.background = "#111318";
+    document.documentElement.style.background = "#111318";
+    document.body.style.margin = "0";
+    document.body.style.padding = "0";
+  }, []);
+
   /* ---- sound ---- */
   const tone = useCallback((f,t=0.08,type="square",g=0.05,delay=0) => {
     if (mutedRef.current) return;
@@ -1337,16 +1345,20 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700;800&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-html, body { background: #111318; height: 100%; }
+html, body { background: #111318; height: 100%; margin: 0; padding: 0; }
 
 /* ---- wrap ---- */
 .wrap {
   font-family: 'Inter', system-ui, sans-serif;
   background: #111318; color: #fff;
-  max-width: 430px; margin: 0 auto; min-height: 100vh;
+  width: 100%; max-width: 430px; margin: 0 auto; min-height: 100vh;
   display: flex; flex-direction: column; position: relative;
-  /* Prevent overflow that causes two-finger zoom on iOS */
   overflow-x: hidden;
+}
+/* On true mobile (narrower than 430px) fill edge-to-edge */
+@media (max-width: 430px) {
+  .wrap { max-width: 100%; }
+  .bottom { max-width: 100%; }
 }
 
 /* ---- confetti ---- */
