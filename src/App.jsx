@@ -680,7 +680,6 @@ const PLAYER_TAGS = {
   "Tony Gonzalez":["precision","legend"], "Shannon Sharpe":["speed","legend"],
 };
 
-
 function tagsFor(player) {
   const tags = new Set(PLAYER_TAGS[player.name] || []);
   if (player.era) tags.add("legend");
@@ -996,6 +995,792 @@ function playPlayoffGame(roster, chemistry, oppLevel) {
   return { w:win, my:score.my, opp:score.opp, name:OPP_NAMES[randInt(0,19)] };
 }
 
+/* ============================ CAP BOWL GAME ============================ */
+/* ============================================================
+   CAP BOWL GAME — self-contained component
+   Props:
+     roster   — array of 5 {player, price} picks [QB,RB,WR,WR,TE]
+     chemistry — finalChem object
+     onWin    — called when TD scored
+     onLose   — called when drive ends without TD
+   ============================================================ */
+
+const FIELD_W = 320;   // logical px, will scale to viewport
+const FIELD_H = 520;
+const EZ_TOP  = 40;    // end zone top edge (y=0 is top of visible field)
+const BALL_Y_START = FIELD_H - 80; // LOS at start (~own 20)
+const FIRST_DOWN_DIST = 45; // px per 10 yards
+
+// Colour constants
+const C = {
+  field:    "#2d6a2d",
+  fieldAlt: "#286028",
+  ezone:    "#1a3d8f",
+  ezoneAlt: "#173580",
+  line:     "rgba(255,255,255,0.25)",
+  yardNum:  "rgba(255,255,255,0.35)",
+  offense:  "#F59E0B",
+  defense:  "#EF4444",
+  ball:     "#c8722a",
+  shadow:   "rgba(0,0,0,0.35)",
+};
+
+const POS_LABEL = ["QB","RB","WR","WR","TE"];
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function dist(a, b) { return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+/* Map a player score (57–99) to 0–1 */
+function norm(score, lo=60, hi=99) { return clamp((score-lo)/(hi-lo), 0, 1); }
+
+/* Run yards: bell-curve around RB score */
+function rollRunYards(rbScore) {
+  const base = 1 + norm(rbScore) * 6; // 1–7
+  const rand = (Math.random() + Math.random()) / 2; // triangle dist 0-1
+  const yards = Math.round(base * rand + Math.random() * 2 - 0.5);
+  const bigRun = Math.random() < norm(rbScore) * 0.15;
+  return bigRun ? yards + randInt(5, 12) : Math.max(0, yards);
+}
+
+
+/* ======================== COMPONENT ======================== */
+export function CapBowlGame({ roster, chemistry, onWin, onLose }) {
+  const qb  = roster[0]?.player;
+  const rb  = roster[1]?.player;
+  const wrs = [roster[2]?.player, roster[3]?.player];
+  const te  = roster[4]?.player;
+
+  // Receivers list: WR1 far left, WR2 far right, TE slot, RB flat
+  const receivers = [
+    { player: wrs[0], label:"WR1", role:"wr1" },
+    { player: wrs[1], label:"WR2", role:"wr2" },
+    { player: te,     label:"TE",  role:"te"  },
+    { player: rb,     label:"RB",  role:"flat"},
+  ];
+
+  /* ---- game state ---- */
+  const [phase, setPhase]       = useState("intro");   // intro|playcall|pass_aim|run_anim|pass_flight|result|td|loss
+  const [gameClock, setGClk]    = useState(120);       // seconds
+  const [playClock, setPClk]    = useState(25);
+  const [timeouts,  setTOs]     = useState(3);
+  const [down,      setDown]    = useState(1);
+  const [toGo,      setToGo]    = useState(10);        // yards
+  const [yardLine,  setYdLine]  = useState(20);        // own 20 = start
+  const [scrollY,   setScrollY] = useState(0);         // field scroll
+  const [lastPlay,  setLast]    = useState(null);       // {text, yards, result}
+  const [clockRun,  setClkRun]  = useState(false);
+  const [passTarget,setPT]      = useState(null);       // receiver index
+  const [ballPos,   setBallPos] = useState({x:FIELD_W/2, y:BALL_Y_START});
+  const [throwArc,  setArc]     = useState(null);      // {sx,sy,ex,ey,t}
+  const [players,   setPlayers] = useState([]);         // animated player positions
+  const [defenders, setDefs]    = useState([]);
+  const [runAnim,   setRunAnim] = useState(null);
+  const [resultMsg, setResultMsg]= useState("");
+  const [gain,      setGain]    = useState(null);       // yards gained last play
+
+  const canvasRef = useRef(null);
+  const rafRef    = useRef(null);
+  const gcRef     = useRef(gameClock);
+  const pcRef     = useRef(playClock);
+  const clkRef    = useRef(null);
+  const pcClkRef  = useRef(null);
+  gcRef.current   = gameClock;
+  pcRef.current   = playClock;
+
+  /* Field scroll: keep LOS in lower 60% of visible field */
+  const losY = useCallback((yl) => {
+    // own 20 = BALL_Y_START, each yard = FIRST_DOWN_DIST/10 px up
+    return BALL_Y_START - ((yl - 20) / 10) * FIRST_DOWN_DIST;
+  }, []);
+
+  const currentLosY = losY(yardLine);
+
+  /* ---- init player positions for a play ---- */
+  const initPositions = useCallback((yl) => {
+    const losYPx = losY(yl);
+    setPlayers([
+      { x: FIELD_W/2,    y: losYPx + 18, label: "QB", role:"qb",  color: C.offense }, // QB
+      { x: FIELD_W/2-70, y: losYPx + 2,  label: "WR", role:"wr1", color: C.offense }, // WR1
+      { x: FIELD_W/2+70, y: losYPx + 2,  label: "WR", role:"wr2", color: C.offense }, // WR2
+      { x: FIELD_W/2+30, y: losYPx + 8,  label: "TE", role:"te",  color: C.offense }, // TE
+      { x: FIELD_W/2,    y: losYPx + 32, label: "RB", role:"rb",  color: C.offense }, // RB
+    ]);
+    setDefs([
+      { x: FIELD_W/2-65, y: losYPx - 20, color: C.defense, role:"cb1" },
+      { x: FIELD_W/2+65, y: losYPx - 20, color: C.defense, role:"cb2" },
+      { x: FIELD_W/2-15, y: losYPx - 12, color: C.defense, role:"lb1" },
+      { x: FIELD_W/2+15, y: losYPx - 12, color: C.defense, role:"lb2" },
+    ]);
+    setBallPos({ x: FIELD_W/2, y: losYPx + 18 });
+    setArc(null);
+    setRunAnim(null);
+    setGain(null);
+  }, [losY]);
+
+  /* ---- start game ---- */
+  const startGame = () => {
+    setPhase("playcall");
+    initPositions(20);
+    setClockRun(true);
+  };
+
+  /* ---- game clock tick ---- */
+  useEffect(() => {
+    if (!clockRun) return;
+    clkRef.current = setInterval(() => {
+      setGClk(g => {
+        if (g <= 1) {
+          clearInterval(clkRef.current);
+          setPhase("loss");
+          setResultMsg("⏰ Clock expired");
+          return 0;
+        }
+        return g - 1;
+      });
+    }, 1000);
+    return () => clearInterval(clkRef.current);
+  }, [clockRun]);
+
+  /* ---- play clock tick ---- */
+  useEffect(() => {
+    if (phase !== "playcall") { clearInterval(pcClkRef.current); return; }
+    setPClk(25);
+    pcClkRef.current = setInterval(() => {
+      setPClk(p => {
+        if (p <= 1) {
+          clearInterval(pcClkRef.current);
+          // delay of game — 5 yard penalty, re-set
+          setResultMsg("⚠️ Delay of game — 5 yards back");
+          const newYl = Math.max(1, yardLine - 5);
+          setYdLine(newYl);
+          setToGo(tg => Math.min(tg + 5, 99));
+          initPositions(newYl);
+          return 25;
+        }
+        return p - 1;
+      });
+    }, 1000);
+    return () => clearInterval(pcClkRef.current);
+  }, [phase]);
+
+  /* ---- timeout ---- */
+  const useTimeout = () => {
+    if (timeouts <= 0 || phase !== "playcall") return;
+    setTOs(t => t - 1);
+    setClockRun(false);
+    setTimeout(() => setClockRun(true), 500);
+  };
+
+  /* ---- select run ---- */
+  const selectRun = () => {
+    if (phase !== "playcall") return;
+    setPhase("run_anim");
+    setClockRun(false); // clock runs after
+    clearInterval(pcClkRef.current);
+
+    const rbScore  = rb?.score || 75;
+    const yards    = rollRunYards(rbScore);
+    const losYPx   = losY(yardLine);
+
+    // animate RB moving forward
+    const targetY = losYPx - (yards / 10) * FIRST_DOWN_DIST;
+    let t = 0;
+    const startY = losYPx + 32;
+    const tick = () => {
+      t += 0.04;
+      if (t >= 1) {
+        t = 1;
+        setPlayers(ps => ps.map(p => p.role === "rb" ? { ...p, y: targetY } : p));
+        setBallPos({ x: FIELD_W/2, y: targetY });
+        setTimeout(() => resolvePlay(yards, "run"), 400);
+        return;
+      }
+      const cy = lerp(startY, targetY, t < 0.5 ? 2*t*t : -1+(4-2*t)*t);
+      setPlayers(ps => ps.map(p => p.role === "rb" ? { ...p, y: cy, x: FIELD_W/2 + Math.sin(t*Math.PI)*12 } : p));
+      setBallPos({ x: FIELD_W/2 + Math.sin(t*Math.PI)*12, y: cy });
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  };
+
+  /* ---- select pass ---- */
+  const selectPass = () => {
+    if (phase !== "playcall") return;
+    setPhase("pass_aim");
+    clearInterval(pcClkRef.current);
+    // animate receivers running routes
+    const losYPx = losY(yardLine);
+    const routes = {
+      wr1: { x: FIELD_W/2 - 80, y: losYPx - 70 }, // go route
+      wr2: { x: FIELD_W/2 + 55, y: losYPx - 35 }, // curl
+      te:  { x: FIELD_W/2 + 20, y: losYPx - 28 }, // checkdown
+      flat:{ x: FIELD_W/2 - 35, y: losYPx + 5  }, // RB flat
+    };
+    let t = 0;
+    const startPositions = {};
+    setPlayers(ps => { ps.forEach(p => { startPositions[p.role] = { x: p.x, y: p.y }; }); return ps; });
+    const roles = ["wr1","wr2","te","flat"];
+    const animate = () => {
+      t += 0.025;
+      if (t >= 1) {
+        setPlayers(ps => ps.map(p => {
+          const r = routes[p.role]; return r ? { ...p, x: r.x, y: r.y } : p;
+        }));
+        return;
+      }
+      setPlayers(ps => ps.map(p => {
+        const r = routes[p.role];
+        const s = startPositions[p.role];
+        if (!r || !s) return p;
+        const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+        return { ...p, x: lerp(s.x, r.x, ease), y: lerp(s.y, r.y, ease) };
+      }));
+      rafRef.current = requestAnimationFrame(animate);
+    };
+    setTimeout(() => {
+      setPlayers(ps => { ps.forEach(p => { startPositions[p.role] = { x: p.x, y: p.y }; }); return ps; });
+      rafRef.current = requestAnimationFrame(animate);
+    }, 50);
+  };
+
+  /* ---- throw to receiver ---- */
+  const throwTo = (recIdx) => {
+    if (phase !== "pass_aim") return;
+    setPhase("pass_flight");
+
+    const recRoles = ["wr1","wr2","te","flat"];
+    const recRole  = recRoles[recIdx];
+    const recPlayer = receivers[recIdx]?.player;
+    const qbScore  = qb?.score || 80;
+    const recScore = recPlayer?.score || 75;
+
+    // Find receiver position
+    let recPos = { x: FIELD_W/2, y: losY(yardLine) - 50 };
+    setPlayers(ps => { const r = ps.find(p => p.role === recRole); if (r) recPos = { x: r.x, y: r.y }; return ps; });
+
+    // Accuracy offset based on QB score
+    const maxErr = clamp(30 - norm(qbScore) * 24, 3, 28);
+    const errX   = (Math.random() - 0.5) * maxErr;
+    const errY   = (Math.random() - 0.5) * maxErr;
+    const landX  = recPos.x + errX;
+    const landY  = recPos.y + errY;
+
+    // Catch radius based on receiver score (+ chemistry)
+    const hasChem = chemistry?.links?.some(l =>
+      (l.a?.name === qb?.name && l.b?.name === recPlayer?.name) ||
+      (l.b?.name === qb?.name && l.a?.name === recPlayer?.name)
+    );
+    const baseRadius = 14 + norm(recScore) * 22; // 14–36
+    const catchRadius = hasChem ? baseRadius * 1.35 : baseRadius;
+
+    const startPos = { x: FIELD_W/2, y: losY(yardLine) + 18 };
+
+    // Animate ball along arc
+    let t = 0;
+    const animBall = () => {
+      t += 0.035;
+      if (t >= 1) {
+        t = 1;
+        const caught = dist({ x: landX, y: landY }, recPos) <= catchRadius;
+        setBallPos({ x: landX, y: landY });
+
+        setTimeout(() => {
+          if (caught) {
+            // yards gained = distance from LOS to receiver
+            const losYPx = losY(yardLine);
+            const yardsGained = Math.max(0, Math.round((losYPx - recPos.y) / FIRST_DOWN_DIST * 10));
+            resolvePlay(yardsGained, "complete");
+          } else {
+            resolvePlay(0, "incomplete");
+            setClockRun(false); // clock stops on inc
+          }
+        }, 350);
+        return;
+      }
+      const ex = lerp(startPos.x, landX, t);
+      const arcPeak = -60 * Math.sin(t * Math.PI);
+      const ey = lerp(startPos.y, landY, t) + arcPeak;
+      setBallPos({ x: ex, y: ey });
+      rafRef.current = requestAnimationFrame(animBall);
+    };
+    setBallPos(startPos);
+    rafRef.current = requestAnimationFrame(animBall);
+    setPT(recIdx);
+  };
+
+  /* ---- resolve play ---- */
+  const resolvePlay = useCallback((yards, type) => {
+    cancelAnimationFrame(rafRef.current);
+    setGain(yards);
+
+    setYdLine(prevYL => {
+      const newYL = prevYL + yards;
+
+      // TD?
+      if (newYL >= 100) {
+        setPhase("td");
+        setClockRun(false);
+        setTimeout(onWin, 1800);
+        return 100;
+      }
+
+      const newToGo = Math.max(1, toGo - yards);
+      const newDown = yards >= toGo ? 1 : down + 1;
+      const newToGoActual = yards >= toGo ? 10 : newToGo;
+
+      setLast({ type, yards });
+
+      if (newDown > 4) {
+        setPhase("loss");
+        setResultMsg("4th down — turnover on downs");
+        setClockRun(false);
+        setTimeout(onLose, 2000);
+        return newYL;
+      }
+
+      setDown(newDown);
+      setToGo(newToGoActual);
+
+      // Clock management
+      if (type === "run" || type === "complete") {
+        setClockRun(true); // runs down
+        // Show result briefly then back to playcall
+        setTimeout(() => {
+          initPositions(newYL);
+          setPhase("playcall");
+        }, 1200);
+      } else {
+        // incomplete — clock stopped
+        setTimeout(() => {
+          initPositions(newYL);
+          setPhase("playcall");
+        }, 900);
+      }
+      return newYL;
+    });
+  }, [down, toGo, onWin, onLose, initPositions]);
+
+  /* ---- canvas draw ---- */
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = FIELD_W, H = FIELD_H;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // --- Draw field stripes ---
+    for (let y = 0; y < H + 40; y += 20) {
+      ctx.fillStyle = (Math.floor(y / 20) % 2 === 0) ? C.field : C.fieldAlt;
+      ctx.fillRect(0, y, W, 20);
+    }
+
+    // --- End zone ---
+    ctx.fillStyle = C.ezone;
+    ctx.fillRect(0, 0, W, EZ_TOP);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 13px 'Bebas Neue', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("END ZONE", W/2, 27);
+
+    // --- Yard lines ---
+    const losYPx = losY(yardLine);
+    for (let yd = 0; yd <= 100; yd += 5) {
+      const lineY = BALL_Y_START - ((yd - 20) / 10) * FIRST_DOWN_DIST;
+      if (lineY < -10 || lineY > H + 10) continue;
+      ctx.strokeStyle = yd % 10 === 0 ? "rgba(255,255,255,0.4)" : "rgba(255,255,255,0.15)";
+      ctx.lineWidth = yd % 10 === 0 ? 1.5 : 0.8;
+      ctx.beginPath();
+      ctx.moveTo(0, lineY);
+      ctx.lineTo(W, lineY);
+      ctx.stroke();
+      if (yd % 10 === 0 && yd > 0 && yd < 100) {
+        ctx.fillStyle = C.yardNum;
+        ctx.font = "10px monospace";
+        ctx.fillText(yd <= 50 ? yd : 100 - yd, 18, lineY - 3);
+        ctx.fillText(yd <= 50 ? yd : 100 - yd, W - 18, lineY - 3);
+      }
+    }
+
+    // --- First down line ---
+    const fdY = losY(yardLine + Math.min(toGo, 99 - yardLine));
+    ctx.strokeStyle = "#FBBF24";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6,3]);
+    ctx.beginPath(); ctx.moveTo(0, fdY); ctx.lineTo(W, fdY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // --- LOS ---
+    ctx.strokeStyle = "rgba(255,255,255,0.6)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, losYPx); ctx.lineTo(W, losYPx); ctx.stroke();
+
+    // --- Hash marks ---
+    for (let yd = 0; yd <= 100; yd++) {
+      const lineY = BALL_Y_START - ((yd - 20) / 10) * FIRST_DOWN_DIST;
+      if (lineY < 0 || lineY > H) continue;
+      ctx.strokeStyle = "rgba(255,255,255,0.2)";
+      ctx.lineWidth = 1;
+      [W*0.33, W*0.67].forEach(hx => {
+        ctx.beginPath(); ctx.moveTo(hx - 5, lineY); ctx.lineTo(hx + 5, lineY); ctx.stroke();
+      });
+    }
+
+    // --- Throw arc ---
+    if (throwArc || (phase === "pass_flight")) {
+      const startY = losYPx + 18;
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      ctx.moveTo(FIELD_W/2, startY);
+      ctx.quadraticCurveTo(FIELD_W/2, startY - 50, ballPos.x, ballPos.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // --- Catch radius circles (pass aim) ---
+    if (phase === "pass_aim") {
+      players.forEach((p, i) => {
+        const roles = ["wr1","wr2","te","flat"];
+        const ri = roles.indexOf(p.role);
+        if (ri === -1) return;
+        const recPlayer = receivers[ri]?.player;
+        const recScore = recPlayer?.score || 75;
+        const hasChem = chemistry?.links?.some(l =>
+          (l.a?.name === qb?.name && l.b?.name === recPlayer?.name) ||
+          (l.b?.name === qb?.name && l.a?.name === recPlayer?.name)
+        );
+        const baseR = 14 + norm(recScore) * 22;
+        const r = hasChem ? baseR * 1.35 : baseR;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.strokeStyle = hasChem ? "rgba(245,158,11,0.7)" : "rgba(255,255,255,0.35)";
+        ctx.lineWidth = hasChem ? 2.5 : 1.5;
+        ctx.stroke();
+        if (hasChem) {
+          ctx.fillStyle = "rgba(245,158,11,0.12)";
+          ctx.fill();
+        }
+      });
+    }
+
+    // --- Defenders ---
+    defenders.forEach(d => {
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, 10, 0, Math.PI * 2);
+      ctx.fillStyle = C.defense;
+      ctx.fill();
+      ctx.strokeStyle = "#7f1d1d";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+
+    // --- Players ---
+    players.forEach(p => {
+      // Shadow
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y + 11, 8, 3, 0, 0, Math.PI * 2);
+      ctx.fillStyle = C.shadow;
+      ctx.fill();
+      // Body
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 11, 0, Math.PI * 2);
+      ctx.fillStyle = p.color;
+      ctx.fill();
+      ctx.strokeStyle = "#92400e";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // Label
+      ctx.fillStyle = "#111";
+      ctx.font = "bold 7px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(p.label, p.x, p.y + 2.5);
+    });
+
+    // --- Ball ---
+    if (phase !== "playcall" && phase !== "pass_aim") {
+      ctx.beginPath();
+      ctx.ellipse(ballPos.x, ballPos.y, 6, 4, Math.PI/4, 0, Math.PI*2);
+      ctx.fillStyle = C.ball;
+      ctx.fill();
+      ctx.strokeStyle = "#7c3605";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // --- TD Flash ---
+    if (phase === "td") {
+      ctx.fillStyle = "rgba(245,158,11,0.25)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#F59E0B";
+      ctx.font = "bold 44px 'Bebas Neue', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("TOUCHDOWN!", W/2, H/2);
+      ctx.fillStyle = "#fff";
+      ctx.font = "16px Inter, sans-serif";
+      ctx.fillText("🏆 CAP BOWL CHAMPION", W/2, H/2 + 34);
+    }
+
+    // --- Clock out ---
+    if (phase === "loss") {
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#EF4444";
+      ctx.font = "bold 32px 'Bebas Neue', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("DRIVE OVER", W/2, H/2);
+      ctx.fillStyle = "#fff";
+      ctx.font = "14px Inter, sans-serif";
+      ctx.fillText(resultMsg, W/2, H/2 + 28);
+    }
+
+  }, [phase, players, defenders, ballPos, yardLine, toGo, down, throwArc, losY, receivers, chemistry, qb, resultMsg]);
+
+  /* ---- cleanup ---- */
+  useEffect(() => () => {
+    cancelAnimationFrame(rafRef.current);
+    clearInterval(clkRef.current);
+    clearInterval(pcClkRef.current);
+  }, []);
+
+  /* ---- format clock ---- */
+  const fmtClock = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+  const downStr  = ["1st","2nd","3rd","4th"][down-1] || "4th";
+
+  /* scale factor: fit to screen width */
+  const scale = Math.min(1, (typeof window !== "undefined" ? window.innerWidth : 390) / (FIELD_W + 16));
+
+  return (
+    <div style={{
+      display:"flex", flexDirection:"column", alignItems:"center",
+      background:"#0D0F14", minHeight:"100vh", padding:"0 0 24px",
+      fontFamily:"'Inter', system-ui, sans-serif", color:"#fff",
+    }}>
+
+      {/* HUD */}
+      <div style={{
+        width:"100%", maxWidth:400, background:"#1C2028",
+        borderBottom:"2px solid #2A3040",
+        display:"grid", gridTemplateColumns:"1fr 1fr 1fr",
+        padding:"8px 12px", gap:4,
+      }}>
+        {/* Left: down/distance */}
+        <div style={{display:"flex",flexDirection:"column",gap:1}}>
+          <div style={{fontSize:18,fontWeight:900,fontFamily:"'Bebas Neue',sans-serif",color:"#F59E0B",lineHeight:1}}>
+            {downStr} &amp; {toGo}
+          </div>
+          <div style={{fontSize:9,color:"#6B7280",fontWeight:700,textTransform:"uppercase",letterSpacing:1}}>
+            {yardLine >= 50 ? `OPP ${100-yardLine}` : `OWN ${yardLine}`}
+          </div>
+        </div>
+        {/* Center: clocks */}
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <div style={{
+            fontFamily:"'Bebas Neue',sans-serif", fontSize:26, lineHeight:1,
+            color: gameClock <= 30 ? "#EF4444" : "#fff",
+          }}>{fmtClock(gameClock)}</div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{fontSize:9,color:"#6B7280",fontWeight:700}}>PLAY {playClock}s</div>
+            {phase === "playcall" && (
+              <div style={{
+                width:8, height:8, borderRadius:"50%",
+                background: playClock <= 10 ? "#EF4444" : "#22C55E",
+                boxShadow: `0 0 5px ${playClock <= 10 ? "#EF4444" : "#22C55E"}`,
+              }}/>
+            )}
+          </div>
+        </div>
+        {/* Right: timeouts */}
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
+          <div style={{display:"flex",gap:4}}>
+            {[0,1,2].map(i => (
+              <div key={i} style={{
+                width:10, height:10, borderRadius:"50%",
+                background: i < timeouts ? "#F59E0B" : "#2A3040",
+                border: "1px solid #3A4050",
+              }}/>
+            ))}
+          </div>
+          <button onClick={useTimeout} disabled={timeouts===0||phase!=="playcall"} style={{
+            background: timeouts>0&&phase==="playcall" ? "#1C2028" : "#111318",
+            border:"1px solid #2A3040", color: timeouts>0&&phase==="playcall" ? "#F59E0B" : "#3A4050",
+            fontSize:8, fontWeight:800, padding:"2px 7px", borderRadius:4,
+            cursor: timeouts>0&&phase==="playcall" ? "pointer" : "not-allowed",
+            letterSpacing:1,
+          }}>TIMEOUT</button>
+        </div>
+      </div>
+
+      {/* Score bug */}
+      <div style={{
+        display:"flex", gap:0, margin:"6px 0 4px",
+        background:"#1C2028", border:"1px solid #2A3040", borderRadius:8,
+        overflow:"hidden", fontSize:12, fontWeight:800,
+      }}>
+        <div style={{padding:"4px 14px", background:"#F59E0B", color:"#111"}}>YOU 0</div>
+        <div style={{padding:"4px 10px", color:"#6B7280", fontSize:10, display:"flex",alignItems:"center"}}>DOWN 4 TO WIN</div>
+        <div style={{padding:"4px 14px", background:"#EF4444", color:"#fff"}}>OPP 4</div>
+      </div>
+
+      {/* Canvas field */}
+      <div style={{
+        position:"relative",
+        transform:`scale(${scale})`, transformOrigin:"top center",
+        width:FIELD_W, height:FIELD_H,
+        boxShadow:"0 8px 40px rgba(0,0,0,0.6)",
+        borderRadius:4, overflow:"hidden",
+        marginBottom: scale < 1 ? -(FIELD_H*(1-scale)) : 0,
+      }}>
+        <canvas ref={canvasRef} width={FIELD_W} height={FIELD_H} style={{display:"block"}}/>
+      </div>
+
+      {/* Play result banner */}
+      {gain !== null && phase === "playcall" && (
+        <div style={{
+          margin:"6px 0 2px",
+          fontSize:14, fontWeight:800,
+          color: gain >= toGo ? "#22C55E" : gain > 0 ? "#F59E0B" : "#9CA3AF",
+        }}>
+          {gain === 0 ? "Incomplete pass" : `+${gain} yards${gain >= toGo ? " — FIRST DOWN! 🔥" : ""}`}
+        </div>
+      )}
+
+      {/* Controls */}
+      <div style={{width:"100%", maxWidth:380, padding:"0 12px", marginTop:8}}>
+        {phase === "intro" && (
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:22,fontWeight:900,fontFamily:"'Bebas Neue',sans-serif",color:"#F59E0B",marginBottom:4}}>
+              CAP BOWL 🏆
+            </div>
+            <div style={{fontSize:13,color:"#9CA3AF",marginBottom:4}}>
+              Down 4 · 2:00 left · Need a TD to win
+            </div>
+            <div style={{
+              background:"#1C2028", border:"1px solid #2A3040", borderRadius:10,
+              padding:"10px 12px", marginBottom:12, textAlign:"left",
+            }}>
+              <div style={{fontSize:10,fontWeight:800,color:"#6B7280",letterSpacing:1.5,marginBottom:6}}>YOUR SQUAD</div>
+              {roster.map((r,i) => r && (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"3px 0"}}>
+                  <span style={{
+                    fontSize:8,fontWeight:800,color:"#111",
+                    background:["#F87171","#FB923C","#FBBF24","#FBBF24","#4ADE80"][i],
+                    padding:"1px 5px",borderRadius:3,minWidth:24,textAlign:"center",
+                  }}>{POS_LABEL[i]}</span>
+                  <span style={{fontSize:12,fontWeight:700}}>{r.player.name}</span>
+                  <span style={{fontSize:10,color:"#6B7280",marginLeft:"auto"}}>{r.player.score}</span>
+                </div>
+              ))}
+            </div>
+            <button onClick={startGame} style={{
+              width:"100%", padding:"14px", borderRadius:12, border:"none",
+              background:"linear-gradient(135deg,#F59E0B,#FBBF24)",
+              color:"#1a0e00", fontWeight:900, fontSize:16, cursor:"pointer",
+              fontFamily:"'Inter',sans-serif", letterSpacing:.3,
+            }}>⚡ Take the Field</button>
+          </div>
+        )}
+
+        {phase === "playcall" && (
+          <div>
+            <div style={{fontSize:10,fontWeight:800,color:"#6B7280",textAlign:"center",letterSpacing:2,marginBottom:8}}>CALL YOUR PLAY</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <button onClick={selectRun} style={{
+                padding:"14px 8px", borderRadius:11, border:"1px solid #2A3040",
+                background:"#1C2028", color:"#fff", cursor:"pointer",
+                fontFamily:"'Inter',sans-serif",
+              }}>
+                <div style={{fontSize:22,marginBottom:3}}>🏃</div>
+                <div style={{fontWeight:900,fontSize:14}}>RUN</div>
+                <div style={{fontSize:9,color:"#FB923C",fontWeight:700}}>{rb?.name?.split(" ").pop() || "RB"}</div>
+              </button>
+              <button onClick={selectPass} style={{
+                padding:"14px 8px", borderRadius:11, border:"1px solid #2A3040",
+                background:"#1C2028", color:"#fff", cursor:"pointer",
+                fontFamily:"'Inter',sans-serif",
+              }}>
+                <div style={{fontSize:22,marginBottom:3}}>🏈</div>
+                <div style={{fontWeight:900,fontSize:14}}>PASS</div>
+                <div style={{fontSize:9,color:"#60A5FA",fontWeight:700}}>{qb?.name?.split(" ").pop() || "QB"}</div>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {phase === "pass_aim" && (
+          <div>
+            <div style={{fontSize:10,fontWeight:800,color:"#60A5FA",textAlign:"center",letterSpacing:2,marginBottom:8}}>CHOOSE YOUR TARGET</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+              {receivers.map((rec,i) => {
+                const hasChem = chemistry?.links?.some(l =>
+                  (l.a?.name === qb?.name && l.b?.name === rec.player?.name) ||
+                  (l.b?.name === qb?.name && l.a?.name === rec.player?.name)
+                );
+                return (
+                  <button key={i} onClick={() => throwTo(i)} style={{
+                    padding:"10px 8px", borderRadius:10,
+                    border: hasChem ? "2px solid #F59E0B" : "1px solid #2A3040",
+                    background: hasChem ? "#232014" : "#1C2028",
+                    color:"#fff", cursor:"pointer", fontFamily:"'Inter',sans-serif",
+                    position:"relative",
+                  }}>
+                    {hasChem && <span style={{
+                      position:"absolute",top:-6,right:6,
+                      fontSize:8,fontWeight:800,color:"#F59E0B",
+                      background:"#0D0F14",padding:"1px 4px",borderRadius:3,
+                    }}>⚡CHEM</span>}
+                    <div style={{fontWeight:900,fontSize:13}}>{rec.label}</div>
+                    <div style={{fontSize:10,color:"#9CA3AF",marginTop:1}}>{rec.player?.name?.split(" ").pop()}</div>
+                    <div style={{
+                      marginTop:4, height:3, borderRadius:99,
+                      background:`hsl(${(rec.player?.score||65)-60},70%,45%)`,
+                      width: `${norm(rec.player?.score||65)*100}%`,
+                    }}/>
+                  </button>
+                );
+              })}
+            </div>
+            <button onClick={() => { setPhase("playcall"); }} style={{
+              marginTop:8, width:"100%", padding:"8px", borderRadius:8,
+              border:"1px solid #2A3040", background:"transparent",
+              color:"#6B7280", fontSize:12, cursor:"pointer",
+              fontFamily:"'Inter',sans-serif",
+            }}>← Cancel</button>
+          </div>
+        )}
+
+        {(phase === "run_anim" || phase === "pass_flight") && (
+          <div style={{textAlign:"center",padding:"12px 0"}}>
+            <div style={{fontSize:28}}>{phase === "run_anim" ? "🏃" : "🏈"}</div>
+            <div style={{fontSize:12,color:"#9CA3AF",fontWeight:600,marginTop:4}}>
+              {phase === "run_anim" ? "Running the ball..." : "Ball in the air..."}
+            </div>
+          </div>
+        )}
+
+        {phase === "td" && (
+          <div style={{textAlign:"center",padding:"16px 0"}}>
+            <div style={{fontSize:40}}>🏆</div>
+            <div style={{fontSize:26,fontWeight:900,fontFamily:"'Bebas Neue',sans-serif",color:"#F59E0B"}}>TOUCHDOWN!</div>
+            <div style={{fontSize:13,color:"#9CA3AF",marginTop:4}}>CAP BOWL CHAMPION</div>
+          </div>
+        )}
+
+        {phase === "loss" && (
+          <div style={{textAlign:"center",padding:"16px 0"}}>
+            <div style={{fontSize:34}}>💔</div>
+            <div style={{fontSize:18,fontWeight:900,fontFamily:"'Bebas Neue',sans-serif",color:"#EF4444"}}>DRIVE OVER</div>
+            <div style={{fontSize:12,color:"#9CA3AF",marginTop:4}}>{resultMsg}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 /* ============================ AVATAR ============================ */
 function Avatar({ player }) {
   const col = TC[player.team] || "#3A3F4A";
@@ -1092,6 +1877,7 @@ export default function CapKings() {
   });
   const [playoff,  setPlayoff]  = useState({stage:0,games:[],pending:false,eliminated:false,champion:false});
   const [copied,   setCopied]   = useState(false);
+  const [capBowl,  setCapBowl]  = useState(false);  // true = playing the Cap Bowl mini game
 
   const spinFlags  = useRef([false,false,false,false,false]);
   const tickRef    = useRef(null);
@@ -1247,6 +2033,12 @@ export default function CapKings() {
   const playRound = () => {
     if (playoff.pending||playoff.eliminated||playoff.champion) return;
     const round=PLAYOFF_ROUNDS[playoff.stage];
+    // Stage 2 = Cap Bowl → launch the mini game instead of auto-sim
+    if (playoff.stage===2) {
+      tone(440,.3,"triangle",.03);
+      setCapBowl(true);
+      return;
+    }
     setPlayoff((p) => ({...p,pending:true}));
     tone(440,.3,"triangle",.03);
     setTimeout(() => {
@@ -1254,15 +2046,27 @@ export default function CapKings() {
       setPlayoff((p) => {
         const games=[...p.games,g];
         if (!g.w) { sFanfare(false); buzz([60,40,60]); return {...p,games,pending:false,eliminated:true}; }
-        if (p.stage===2) {
-          sChamp(); buzz([50,50,50,50,120]);
-          setCareer((c)=>({...c,titles:c.titles+1}));
-          return {...p,games,pending:false,champion:true};
-        }
         sFanfare(true); buzz(30);
         return {...p,games,stage:p.stage+1,pending:false};
       });
     },1000);
+  };
+
+  /* ---- Cap Bowl game callbacks ---- */
+  const onCapBowlWin = () => {
+    setCapBowl(false);
+    sChamp(); buzz([50,50,50,50,120]);
+    setCareer((c)=>({...c,titles:c.titles+1}));
+    setPlayoff((p) => ({...p, champion:true, eliminated:false,
+      games:[...p.games, {w:true, my:7, opp:4, name:"Renegades"}]
+    }));
+  };
+  const onCapBowlLose = () => {
+    setCapBowl(false);
+    sFanfare(false); buzz([60,40,60]);
+    setPlayoff((p) => ({...p, eliminated:true,
+      games:[...p.games, {w:false, my:0, opp:4, name:"Renegades"}]
+    }));
   };
 
   /* ---- share ---- */
@@ -1309,7 +2113,7 @@ export default function CapKings() {
   const newBoardReset = () => {
     clearTimers(); fanfared.current=false;
     setPicks({}); setActiveCol(null); setPhase("draft");
-    setResult(null); setReveal(0); setCopied(false);
+    setResult(null); setReveal(0); setCopied(false); setCapBowl(false);
     setPlayoff({stage:0,games:[],pending:false,eliminated:false,champion:false});
     setRowPrices([5,4,3,2,1]); setDispPrices([5,4,3,2,1]);
     setSpinRows([false,false,false,false,false]);
@@ -1329,6 +2133,18 @@ export default function CapKings() {
     <div className="wrap">
       <style>{CSS}</style>
       {celebrate && <Confetti/>}
+
+      {/* ========== CAP BOWL MINI GAME OVERLAY ========== */}
+      {capBowl && roster && (
+        <div style={{position:"fixed",inset:0,zIndex:300,overflowY:"auto",background:"#0D0F14"}}>
+          <CapBowlGame
+            roster={roster}
+            chemistry={finalChem}
+            onWin={onCapBowlWin}
+            onLose={onCapBowlLose}
+          />
+        </div>
+      )}
 
       {/* ========== HEADER ========== */}
       <header className="hdr">
@@ -1510,8 +2326,9 @@ export default function CapKings() {
                   {PLAYOFF_ROUNDS[i].name}: <b>{g.w?"W":"L"} {g.my}-{g.opp}</b> vs {g.name}
                 </div>
               ))}
-              <button className="po-btn" onClick={playRound} disabled={playoff.pending}>
-                {playoff.pending?"...":"Play "+PLAYOFF_ROUNDS[playoff.stage].name+" ▶"}
+              <button className="po-btn" onClick={playRound} disabled={playoff.pending}
+                style={playoff.stage===2?{background:"linear-gradient(135deg,#F59E0B,#FBBF24)",color:"#1a0e00"}:{}}>
+                {playoff.pending?"...":playoff.stage===2?"🏈 Play the Cap Bowl!":"Play "+PLAYOFF_ROUNDS[playoff.stage].name+" ▶"}
               </button>
             </div>
           )}
