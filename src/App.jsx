@@ -634,6 +634,17 @@ const GS = {
 const rf = (r) => Math.max(0, Math.min(1, ((r ?? 75) - 50) / 49));
 const yardToScreenY = (fieldYard, ballYard) => LOS_Y - (fieldYard - ballYard) * PPY;
 
+// How far the camera may scroll. Keeps a little grass behind the LOS and stops
+// the view right at the back of the end zone (no big empty void past it).
+function clampCam(camY, ballYard) {
+  // world Y of the back of the attacking end zone (10 yds past the goal line)
+  const endzoneBackY = yardToScreenY(100, ballYard) - PPY * 10;
+  // we never want to show above ~40px of the end-zone back edge
+  const maxUp = (CH * 0.5) - endzoneBackY - 40;   // most we can push the view "up"
+  const maxDown = 120;                            // a touch of room behind the LOS
+  return Math.max(-Math.abs(maxUp), Math.min(maxDown, camY));
+}
+
 function getFormation() {
   return {
     QB: { x: CENTER_X, y: LOS_Y + 70 },
@@ -847,13 +858,56 @@ function drawField(ctx, ballYard, camY = 0) {
   ctx.beginPath(); ctx.moveTo(SIDE_R, -300); ctx.lineTo(SIDE_R, CH + 300); ctx.stroke();
   ctx.restore();
 
-  const cp = ["#e74c3c", "#3498db", "#f1c40f", "#ecf0f1", "#e67e22", "#9b59b6"];
-  for (let i = 0; i < 70; i++) {
-    const cy = (i * 15 + 8) % CH;
-    ctx.fillStyle = cp[i % cp.length];
-    ctx.fillRect(2, cy, SIDE_L - 4, 11);
-    ctx.fillRect(SIDE_R + 2, cy, CW - SIDE_R - 4, 11);
-  }
+  drawStands(ctx);
+}
+
+// Stadium stands down both sidelines: tiered concrete with rows of fan pixels.
+function drawStands(ctx) {
+  const shirts = ["#e74c3c", "#3498db", "#f1c40f", "#ecf0f1", "#e67e22", "#9b59b6", "#1abc9c", "#fff"];
+  const skin = ["#e6bd84", "#c98a52", "#8d5524", "#f1c27d"];
+
+  [{ x0: 0, x1: SIDE_L, dir: 1 }, { x0: SIDE_R, x1: CW, dir: -1 }].forEach((side) => {
+    const w = side.x1 - side.x0;
+    // concrete base
+    const grd = ctx.createLinearGradient(side.x0, 0, side.x1, 0);
+    const inner = side.dir === 1 ? side.x1 : side.x0;
+    grd.addColorStop(0, "#3a3f4a");
+    grd.addColorStop(1, "#23262e");
+    ctx.fillStyle = grd;
+    ctx.fillRect(side.x0, 0, w, CH);
+
+    // tier step shadow near the field (wall)
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    if (side.dir === 1) ctx.fillRect(side.x1 - 3, 0, 3, CH);
+    else ctx.fillRect(side.x0, 0, 3, CH);
+
+    // rows of fans, packed
+    const rowH = 9;
+    const cols = Math.max(2, Math.floor((w - 4) / 7));
+    for (let ry = 0; ry * rowH < CH; ry++) {
+      const fy = ry * rowH + 4;
+      for (let cx = 0; cx < cols; cx++) {
+        // deterministic but varied pattern
+        const seed = (ry * 31 + cx * 17) % 97;
+        const fx = side.x0 + 3 + cx * 7 + (ry % 2) * 2;
+        if (fx > side.x1 - 4) continue;
+        // body (shirt)
+        ctx.fillStyle = shirts[seed % shirts.length];
+        ctx.fillRect(fx, fy + 3, 5, 5);
+        // head
+        ctx.fillStyle = skin[(seed >> 2) % skin.length];
+        ctx.fillRect(fx + 1, fy, 3, 3);
+      }
+      // faint row separators (bleacher lines)
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.fillRect(side.x0, fy + 8, w, 1);
+    }
+
+    // glass railing along the field edge
+    ctx.fillStyle = "rgba(180,210,255,0.18)";
+    if (side.dir === 1) ctx.fillRect(side.x1 - 6, 0, 3, CH);
+    else ctx.fillRect(side.x0 + 3, 0, 3, CH);
+  });
 }
 
 const DGW = 150;
@@ -1095,6 +1149,15 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose }) {
     };
   }, [rosterInput]);
 
+  // short label for on-field tags: last name (or single token), capped length
+  const nameOf = useCallback((role) => {
+    const raw = roster[role]?.name || role;
+    const parts = raw.replace(/\./g, "").split(" ");
+    let s = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+    if (s.length > 9) s = s.slice(0, 9);
+    return s.toUpperCase();
+  }, [roster]);
+
   const canvasRef = useRef(null), rafRef = useRef(null), G = useRef(null);
   const phaseRef = useRef(GS.INTRO), uiRef = useRef(null);
   const dragRef = useRef({ active: false, startX: 0, startY: 0, curX: 0, curY: 0 });
@@ -1236,9 +1299,23 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose }) {
       if (ph === GS.RUNNING) {
         const p = g.carrier === "qb" ? g.qb : g.receivers[g.carrier];
         if (p) { const res = stepCarrier(g, roster); if (res === "touchdown") touchdown(g); else if (res === "tackled") resolveRun(g, p.y); }
-      } else g.camTargetY = 0;
+      }
+
+      // --- CAMERA: follow whatever the ball is attached to, in every live phase ---
+      let focusY = null;
+      if (ph === GS.RUNNING) {
+        const p = g.carrier === "qb" ? g.qb : g.receivers[g.carrier];
+        if (p) focusY = p.y;
+      } else if (ph === GS.BALL_AIR) {
+        // follow the ball (or the receiver it's settling into)
+        focusY = g.pendingCatch ? g.receivers[g.pendingCatch.role].y : g.ball.y;
+      } else if (ph === GS.THROWING || ph === GS.LIVE || ph === GS.READY) {
+        focusY = LOS_Y;            // pre-snap / coverage: sit on the line
+      }
+      if (focusY != null) g.camTargetY = (CH * 0.56) - focusY;
+
       g.camY += (g.camTargetY - g.camY) * 0.12;
-      g.camY = Math.max(-260, Math.min(260, g.camY));
+      g.camY = clampCam(g.camY, g.ballYard);
       drawField(ctx, g.ballYard, g.camY);
       ctx.save(); ctx.translate(0, g.camY);
       const ui = uiRef.current;
@@ -1250,8 +1327,8 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose }) {
       g.OL.forEach((ol) => { const dy = losY - 13; ctx.fillStyle = "#cf3b2c"; ctx.fillRect(ol.x - 8, dy - 9, 16, 18); ctx.fillStyle = "#8e2820"; ctx.fillRect(ol.x - 7, dy - 11, 14, 9); });
       Object.values(g.defenders).forEach((d) => drawPlayer(ctx, d.x, d.y, false, false, "", d.anim || 0, d.moving));
       const showL = isLive || ph === GS.BALL_AIR || ph === GS.RUNNING;
-      Object.entries(g.receivers).forEach(([role, rec]) => drawPlayer(ctx, rec.x, rec.y, true, g.carrier === role && !g.ball.inAir, showL ? role.replace(/\d/, "") : "", rec.anim || 0, rec.moving, rec.catchAnim));
-      drawPlayer(ctx, g.qb.x, g.qb.y, true, g.carrier === "qb" && !g.ball.inAir, showL ? "QB" : "", g.qb.anim || 0, g.qb.moving);
+      Object.entries(g.receivers).forEach(([role, rec]) => drawPlayer(ctx, rec.x, rec.y, true, g.carrier === role && !g.ball.inAir, showL ? nameOf(role) : "", rec.anim || 0, rec.moving, rec.catchAnim));
+      drawPlayer(ctx, g.qb.x, g.qb.y, true, g.carrier === "qb" && !g.ball.inAir, showL ? nameOf("QB") : "", g.qb.anim || 0, g.qb.moving);
       if (g.ball.inAir) {
         ctx.fillStyle = "rgba(0,0,0,0.22)"; ctx.beginPath(); ctx.ellipse(g.ball.x, g.ball.y + 4, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
         ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(g.ball.lx, g.ball.ly, 9, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
