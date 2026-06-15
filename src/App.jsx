@@ -608,6 +608,7 @@ const SIDE_R = CW - 22;
 const LOS_Y = 620;
 const PPY = 15;
 const P_HALF = 11;
+const GAME_SPEED = 0.8; // 20% slower player movement across the Cap Bowl mini-game
 
 const DEFAULT_CAP_ROSTER = {
   QB: { name: "Patrick Mahomes", rating: 99 },
@@ -658,15 +659,16 @@ function getFormation() {
 }
 
 const PLAY_DEFS = [
-  { id: "slants", name: "Slants", type: "pass", desc: "Both WRs slant · TE go", routes: { WR1: [[1,0],[6,72]], WR2: [[1,0],[6,-72]], TE: [[1,0],[16,0]], RB: [[0,42],[1,92]] } },
-  { id: "mesh", name: "Mesh", type: "pass", desc: "Short crossers · TE corner", routes: { WR1: [[2,0],[4,95],[5,205]], WR2: [[2,0],[4,-95],[5,-205]], TE: [[6,0],[11,82]], RB: [[0,42],[1,88]] } },
-  { id: "verts", name: "Verts", type: "pass", desc: "Everyone runs a go", routes: { WR1: [[18,0]], WR2: [[18,0]], TE: [[17,-6]], RB: [[0,55],[10,42]] } },
-  { id: "pa_smash", name: "PA Smash", type: "pass", desc: "Post · slant · drag", routes: { WR1: [[7,0],[16,92]], WR2: [[1,0],[6,-70]], TE: [[3,0],[4,-185]], RB: [[0,42],[1,88]] } },
-  { id: "curls", name: "Curls", type: "pass", desc: "Everyone curls back", routes: { WR1: [[11,0],[9,14]], WR2: [[11,0],[9,-14]], TE: [[9,0],[7,0]], RB: [[3,42],[2,42]] } },
-  { id: "hb_smash", name: "HB Smash", type: "run", desc: "Hand off · find the hole", routes: { WR1: [[1,0],[2,-8]], WR2: [[1,0],[2,8]], TE: [[1,0],[2,0]], RB: [[1,16],[3,-12],[10,6]] } },
+  // Routes below are full-depth. The receiver will finish every waypoint before freelancing upfield.
+  { id: "slants", name: "Slants", type: "pass", desc: "Both WRs run full slants · TE seam", routes: { WR1: [[1,0],[5,55],[10,125]], WR2: [[1,0],[5,-55],[10,-125]], TE: [[2,0],[18,0]], RB: [[0,42],[2,104]] } },
+  { id: "mesh", name: "Mesh", type: "pass", desc: "Full crossers · TE corner", routes: { WR1: [[2,0],[5,110],[7,235]], WR2: [[2,0],[5,-110],[7,-235]], TE: [[6,0],[14,95]], RB: [[0,42],[2,100]] } },
+  { id: "verts", name: "Verts", type: "pass", desc: "Everyone runs a go", routes: { WR1: [[22,0]], WR2: [[22,0]], TE: [[20,-6]], RB: [[0,55],[13,42]] } },
+  { id: "pa_smash", name: "PA Smash", type: "pass", desc: "Deep post · full slant · drag", routes: { WR1: [[8,0],[18,80],[26,135]], WR2: [[1,0],[6,-70],[12,-145]], TE: [[3,0],[5,-135],[7,-260]], RB: [[0,42],[2,100]] } },
+  { id: "curls", name: "Curls", type: "pass", desc: "Everyone curls back", routes: { WR1: [[13,0],[10,18]], WR2: [[13,0],[10,-18]], TE: [[11,0],[8,0]], RB: [[4,42],[3,42]] } },
+  { id: "hb_smash", name: "HB Smash", type: "run", desc: "Hand off · find the hole", routes: { WR1: [[1,0],[3,-8]], WR2: [[1,0],[3,8]], TE: [[1,0],[3,0]], RB: [[1,16],[3,-12],[10,6]] } },
 ];
 
-function drawPlayer(ctx, x, y, isUser, hasBall = false, labelText = "", anim = 0, moving = false) {
+function drawPlayer(ctx, x, y, isUser, hasBall = false, labelText = "", anim = 0, moving = false, action = null) {
   const hw = P_HALF;
   const body = isUser ? "#3776d6" : "#cf3b2c";
   const dark = isUser ? "#1c4a9e" : "#8e2820";
@@ -677,6 +679,46 @@ function drawPlayer(ctx, x, y, isUser, hasBall = false, labelText = "", anim = 0
   const lF = cyc * 3.5;
   const rF = -cyc * 3.5;
   const armS = moving ? Math.sin(anim + Math.PI) * 2.6 : 0;
+  const actionType = action?.type || null;
+  const actionT = action?.t || 0;
+
+  // Special catch animations. Dive = horizontal body and down by contact/ground.
+  // Jump = body pops upward with arms high, then freezes for a beat before running.
+  if (actionType === "dive") {
+    const dir = action?.dir || 1;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(dir > 0 ? -0.95 : 0.95);
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath(); ctx.ellipse(0, hw + 7, hw * 1.3, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = pants;
+    ctx.fillRect(-hw * 0.95, hw * 0.42, hw * 0.55, hw * 0.28);
+    ctx.fillRect(-hw * 0.35, hw * 0.42, hw * 0.55, hw * 0.28);
+    ctx.fillStyle = body;
+    ctx.fillRect(-hw * 0.62, -hw * 0.35, hw * 1.55, hw * 0.95);
+    ctx.fillStyle = lite;
+    ctx.fillRect(-hw * 0.45, -hw * 0.25, hw * 0.6, hw * 0.32);
+    ctx.fillStyle = "#e6bd84";
+    ctx.fillRect(hw * 0.70, -hw * 0.18, hw * 0.78, hw * 0.22);
+    ctx.fillRect(hw * 0.70, hw * 0.22, hw * 0.78, hw * 0.22);
+    ctx.beginPath(); ctx.arc(hw * 1.15, -hw * 0.62, hw * 0.43, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = helmC;
+    ctx.beginPath(); ctx.arc(hw * 1.15, -hw * 0.66, hw * 0.43, Math.PI, Math.PI * 2); ctx.fill();
+    if (hasBall) {
+      ctx.fillStyle = "#7a3b10";
+      ctx.beginPath(); ctx.ellipse(hw * 1.62, 0.02, 5.8, 3.8, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 0.7; ctx.beginPath(); ctx.moveTo(hw * 1.45, 0.02); ctx.lineTo(hw * 1.78, 0.02); ctx.stroke();
+    }
+    ctx.restore();
+    if (labelText) {
+      ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(x - 18, y - P_HALF - 20, 36, 12);
+      ctx.fillStyle = "#f0c040"; ctx.font = "bold 9px monospace"; ctx.textAlign = "center"; ctx.fillText(labelText, x, y - P_HALF - 10);
+    }
+    return;
+  }
+
+  const jumpLift = actionType === "jump" ? Math.sin(Math.min(1, actionT / 16) * Math.PI) * 22 : 0;
+  y -= jumpLift;
 
   ctx.fillStyle = "rgba(0,0,0,0.25)";
   ctx.beginPath(); ctx.ellipse(x, y + hw + 4, hw * 0.95, 3.5, 0, 0, Math.PI * 2); ctx.fill();
@@ -698,8 +740,16 @@ function drawPlayer(ctx, x, y, isUser, hasBall = false, labelText = "", anim = 0
   ctx.fillRect(x - hw * 0.22, y - hw * 0.05, hw * 0.44, hw * 0.16);
 
   ctx.fillStyle = "#e6bd84";
-  ctx.fillRect(x - hw * 0.92, y - hw * 0.12 + armS, hw * 0.34, hw * 0.6);
-  ctx.fillRect(x + hw * 0.58, y - hw * 0.12 - armS, hw * 0.34, hw * 0.6);
+  if (actionType === "jump") {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-0.25); ctx.fillRect(-hw * 0.95, -hw * 0.95, hw * 0.28, hw * 0.9);
+    ctx.rotate(0.5); ctx.fillRect(hw * 0.65, -hw * 0.95, hw * 0.28, hw * 0.9);
+    ctx.restore();
+  } else {
+    ctx.fillRect(x - hw * 0.92, y - hw * 0.12 + armS, hw * 0.34, hw * 0.6);
+    ctx.fillRect(x + hw * 0.58, y - hw * 0.12 - armS, hw * 0.34, hw * 0.6);
+  }
 
   if (hasBall) {
     ctx.fillStyle = "#7a3b10";
@@ -907,47 +957,106 @@ function CelebrationCanvas() {
   return <canvas ref={cRef} width={CW} height={CH} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", imageRendering: "pixelated", pointerEvents: "none" }} />;
 }
 
-function makeReceiver(sx, sy, waypoints) {
-  return { x: sx, y: sy, wpIdx: 0, waypoints, mode: "ROUTE", openAngle: 0, openTimer: 0, anim: 0, moving: false, facing: 0 };
+function makeReceiver(sx, sy, waypoints, sitHold = 0) {
+  return {
+    x: sx, y: sy, wpIdx: 0, waypoints, mode: "ROUTE",
+    openAngle: 0, openTimer: 0, anim: 0, moving: false, facing: 0,
+    freeze: 0, downed: false, catchAnim: null, lastRouteAngle: -Math.PI / 2,
+    sitHold, sitting: 0,
+  };
 }
 
 function stepReceiver(rec, speed) {
+  if (rec.downed) { rec.moving = false; return; }
+  if (rec.freeze > 0) { rec.freeze -= 1; rec.moving = false; rec.anim = (rec.anim || 0) + 0.08; return; }
+
   const ox = rec.x, oy = rec.y;
   if (rec.mode === "ROUTE") {
     if (rec.wpIdx >= rec.waypoints.length) {
-      rec.mode = "OPEN";
-      rec.openAngle = -Math.PI / 2 + (Math.random() - 0.5) * 0.8;
-      rec.openTimer = 0;
+      if (rec.sitHold > 0) {
+        rec.mode = "SIT";
+        rec.sitting = rec.sitHold;
+      } else {
+        rec.mode = "OPEN";
+        // Do not instantly turn vertical. Keep the last route shape a moment, then freelance.
+        rec.openAngle = rec.lastRouteAngle || -Math.PI / 2;
+        rec.openTimer = -24;
+      }
     } else {
-      const wp = rec.waypoints[rec.wpIdx], dx = wp.x - rec.x, dy = wp.y - rec.y, d = Math.sqrt(dx * dx + dy * dy);
-      if (d < speed + 0.5) { rec.x = wp.x; rec.y = wp.y; rec.wpIdx++; }
-      else { rec.x += dx / d * speed; rec.y += dy / d * speed; }
+      const wp = rec.waypoints[rec.wpIdx];
+      const dx = wp.x - rec.x, dy = wp.y - rec.y, d = Math.sqrt(dx * dx + dy * dy);
+      if (d < speed + 0.5) {
+        rec.x = wp.x; rec.y = wp.y; rec.wpIdx++;
+        if (Math.abs(dx) + Math.abs(dy) > 0.01) rec.lastRouteAngle = Math.atan2(dy, dx);
+      } else {
+        rec.x += dx / d * speed; rec.y += dy / d * speed;
+        rec.lastRouteAngle = Math.atan2(dy, dx);
+      }
+    }
+  } else if (rec.mode === "SIT") {
+    rec.sitting -= 1;
+    if (rec.sitting <= 0) {
+      rec.mode = "OPEN";
+      rec.openAngle = rec.lastRouteAngle || -Math.PI / 2;
+      rec.openTimer = -18;
     }
   } else {
     rec.openTimer++;
     if (rec.openTimer > 45 + Math.random() * 35) { rec.openTimer = 0; rec.openAngle = -Math.PI / 2 + (Math.random() - 0.5) * 1.2; }
-    rec.x += Math.cos(rec.openAngle) * speed * 0.6;
-    rec.y += Math.sin(rec.openAngle) * speed * 0.6 - 0.3;
+    const drift = rec.openTimer < 0 ? 0.42 : 0.6;
+    rec.x += Math.cos(rec.openAngle) * speed * drift;
+    rec.y += Math.sin(rec.openAngle) * speed * drift - (rec.openTimer < 0 ? 0 : 0.3 * GAME_SPEED);
   }
   rec.x = Math.max(SIDE_L + 8, Math.min(SIDE_R - 8, rec.x));
   rec.y = Math.max(20, rec.y);
   const mv = Math.abs(rec.x - ox) + Math.abs(rec.y - oy);
   rec.moving = mv > 0.3;
-  if (rec.moving) { rec.anim = (rec.anim || 0) + 0.4; rec.facing = rec.x - ox; }
+  if (rec.moving) { rec.anim = (rec.anim || 0) + 0.32; rec.facing = rec.x - ox; }
+}
+
+function stepReceiverTowardBall(rec, speed, tx, ty) {
+  if (rec.downed) { rec.moving = false; return; }
+  if (rec.freeze > 0) { rec.freeze -= 1; rec.moving = false; rec.anim = (rec.anim || 0) + 0.08; return; }
+  const ox = rec.x, oy = rec.y;
+  const dx = tx - rec.x, dy = ty - rec.y;
+  const d = Math.sqrt(dx * dx + dy * dy);
+  if (d > 2) {
+    const chaseSpeed = Math.min(speed * 1.2, d);
+    rec.x += dx / d * chaseSpeed;
+    rec.y += dy / d * chaseSpeed;
+  }
+  rec.x = Math.max(SIDE_L + 8, Math.min(SIDE_R - 8, rec.x));
+  rec.y = Math.max(20, rec.y);
+  const mv = Math.abs(rec.x - ox) + Math.abs(rec.y - oy);
+  rec.moving = mv > 0.25;
+  if (rec.moving) { rec.anim = (rec.anim || 0) + 0.32; rec.facing = rec.x - ox; }
 }
 
 function stepCarrier(g, roster) {
   const ckey = g.carrier;
   const p = ckey === "qb" ? g.qb : g.receivers[ckey];
   if (!p) return "tackled";
+  if (p.downed) return "tackled";
   const carR = ckey === "RB" ? rf(roster.RB?.rating) : ckey === "qb" ? rf(roster.QB?.rating) : ckey === "TE" ? rf(roster.TE?.rating) : ckey === "WR1" ? rf(roster.WR1?.rating) : rf(roster.WR2?.rating);
-  const speed = 1.5 + carR * 1.3;
+  const speed = (1.5 + carR * 1.3) * GAME_SPEED;
   let steerX = 0, nearest = null, nd = Infinity;
   Object.values(g.defenders).forEach((d) => {
     const dx = d.x - p.x, dy = d.y - p.y, dd = Math.sqrt(dx * dx + dy * dy);
     if (dd < nd) { nd = dd; nearest = d; }
     if (dd < 90 && d.y < p.y + 18) steerX += -(dx / (Math.abs(dx) || 1)) * (90 - dd) / 90;
   });
+  if (p.freeze > 0) {
+    p.freeze -= 1;
+    p.moving = false;
+    g.ball.x = p.x; g.ball.y = p.y;
+    Object.values(g.defenders).forEach((d) => {
+      const dx = p.x - d.x, dy = p.y - 10 - d.y, dd = Math.sqrt(dx * dx + dy * dy);
+      const dsp = (d.pursuit || 2.6) * 1.05 * GAME_SPEED;
+      if (dd > 1) { const ox = d.x; d.x += dx / dd * dsp; d.y += dy / dd * dsp; d.anim = (d.anim || 0) + 0.45; d.moving = true; d.facing = d.x - ox; }
+    });
+    return nearest && nd < 16 ? "tackled" : null;
+  }
+  if (p.catchAnim?.type === "jump") p.catchAnim = null;
   if (nearest && nd < 16) {
     if (Math.random() < carR * 0.18) { nearest.y += 20; nearest.x += Math.random() * 14 - 7; }
     else return "tackled";
@@ -962,7 +1071,7 @@ function stepCarrier(g, roster) {
   if (p.y <= yardToScreenY(100, g.ballYard)) return "touchdown";
   Object.values(g.defenders).forEach((d) => {
     const dx = p.x - d.x, dy = p.y - 10 - d.y, dd = Math.sqrt(dx * dx + dy * dy);
-    const dsp = d.pursuit || 2.6;
+    const dsp = (d.pursuit || 2.6) * GAME_SPEED;
     if (dd > 1) { const ox = d.x; d.x += dx / dd * dsp; d.y += dy / dd * dsp; d.anim = (d.anim || 0) + 0.45; d.moving = true; d.facing = d.x - ox; }
   });
   return null;
@@ -1001,15 +1110,15 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose }) {
     }
     G.current = {
       tick: 0, ballYard, play, qb: { x: form.QB.x, y: form.QB.y }, OL: form.OL,
-      receivers: { WR1: makeReceiver(form.WR1.x, form.WR1.y, absWp("WR1")), WR2: makeReceiver(form.WR2.x, form.WR2.y, absWp("WR2")), TE: makeReceiver(form.TE.x, form.TE.y, absWp("TE")), RB: makeReceiver(form.RB.x, form.RB.y, absWp("RB")) },
+      receivers: { WR1: makeReceiver(form.WR1.x, form.WR1.y, absWp("WR1"), play.id === "curls" ? 42 : 0), WR2: makeReceiver(form.WR2.x, form.WR2.y, absWp("WR2"), play.id === "curls" ? 42 : 0), TE: makeReceiver(form.TE.x, form.TE.y, absWp("TE"), play.id === "curls" ? 42 : 0), RB: makeReceiver(form.RB.x, form.RB.y, absWp("RB"), play.id === "curls" ? 26 : 0) },
       defenders: { CB1: { ...form.DEF.CB1, cover: "WR1", pursuit: 2.7, anim: 0, moving: false }, CB2: { ...form.DEF.CB2, cover: "WR2", pursuit: 2.7, anim: 0, moving: false }, LB1: { ...form.DEF.LB1, cover: "TE", pursuit: 2.5, anim: 0, moving: false }, LB2: { ...form.DEF.LB2, cover: "RB", pursuit: 2.5, anim: 0, moving: false }, S: { ...form.DEF.S, cover: "S", pursuit: 2.8, anim: 0, moving: false } },
       ball: { x: form.QB.x, y: form.QB.y, vx: 0, vy: 0, angle: 0, inAir: false },
-      carrier: "qb", thrownTo: null, camY: 0, camTargetY: 0,
+      carrier: "qb", thrownTo: null, pendingCatch: null, camY: 0, camTargetY: 0,
     };
   }
 
   const recRating = useCallback((role) => role === "RB" ? rf(roster.RB?.rating) : role === "TE" ? rf(roster.TE?.rating) : role === "WR1" ? rf(roster.WR1?.rating) : rf(roster.WR2?.rating), [roster]);
-  const recSpeed = useCallback((role) => 1.1 + recRating(role) * 1.1, [recRating]);
+  const recSpeed = useCallback((role) => (1.1 + recRating(role) * 1.1) * GAME_SPEED, [recRating]);
 
   function resolveIncomplete(g) {
     const ui = uiRef.current, nd = ui.down + 1, to = nd > 4;
@@ -1054,31 +1163,74 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose }) {
         });
       }
       if (ph === GS.BALL_AIR) {
-        g.ball.x += g.ball.vx; g.ball.y += g.ball.vy; g.ball.flown += 1;
-        g.ball.angle = Math.atan2(g.ball.vy, g.ball.vx) + Math.PI / 2;
-        const prog = Math.min(1, g.ball.flown / g.ball.flightFrames);
-        g.ball.lift = Math.sin(prog * Math.PI) * g.ball.maxLift;
-        Object.entries(g.receivers).forEach(([role, rec]) => stepReceiver(rec, recSpeed(role) * 0.92));
-        Object.values(g.defenders).forEach((def) => { const dx = g.ball.lx - def.x, dy = g.ball.ly - def.y, d = Math.sqrt(dx * dx + dy * dy); if (d > 3) { const ox = def.x; def.x += dx / d * def.speed * 1.05; def.y += dy / d * def.speed * 1.05; def.anim = (def.anim || 0) + 0.4; def.moving = true; def.facing = def.x - ox; } });
-        if (prog >= 1) {
-          const lx = g.ball.lx, ly = g.ball.ly;
-          let bestRole = null, bestDist = Infinity;
-          Object.entries(g.receivers).forEach(([role, rec]) => { const dx = rec.x - lx, dy = rec.y - ly, d = Math.sqrt(dx * dx + dy * dy); if (d < bestDist) { bestDist = d; bestRole = role; } });
-          const rr = bestRole ? recRating(bestRole) : 0;
-          const reach = 20 + rr * 28 + (chemistry?.totalBonus || 0) * 12;
-          if (bestRole && bestDist < reach) {
-            let nearDef = Infinity;
-            Object.values(g.defenders).forEach((d) => { const x = d.x - lx, y = d.y - ly; nearDef = Math.min(nearDef, Math.sqrt(x * x + y * y)); });
-            const qbR = rf(roster.QB?.rating);
-            const onTarget = 1 - Math.min(1, bestDist / reach);
-            const cov = nearDef < 26 ? 0.55 : nearDef < 48 ? 0.22 : 0;
-            const catchP = Math.max(0.05, Math.min(0.97, 0.30 + rr * 0.40 + qbR * 0.10 + onTarget * 0.20 - cov + (chemistry?.totalBonus || 0) * 0.4));
-            if (Math.random() < catchP) {
-              const rec = g.receivers[bestRole];
-              g.carrier = bestRole; g.ball.inAir = false; g.ball.x = rec.x; g.ball.y = rec.y;
+        if (g.pendingCatch) {
+          const pc = g.pendingCatch;
+          const rec = g.receivers[pc.role];
+          pc.t += 1;
+          const dur = pc.type === "dive" ? 13 : 16;
+          const t = Math.min(1, pc.t / dur);
+          const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+          rec.catchAnim = { type: pc.type, t: pc.t, dir: pc.dir };
+          rec.x = pc.startX + (pc.targetX - pc.startX) * ease;
+          rec.y = pc.startY + (pc.targetY - pc.startY) * ease;
+          rec.moving = false;
+          g.ball.x = rec.x; g.ball.y = rec.y; g.ball.lift = pc.type === "jump" ? Math.sin(t * Math.PI) * 22 : 0;
+          g.ball.angle += 0.35;
+          if (t >= 1) {
+            g.ball.inAir = false;
+            g.carrier = pc.role;
+            g.ball.x = rec.x; g.ball.y = rec.y;
+            if (pc.type === "dive") {
+              rec.downed = true;
+              rec.catchAnim = { type: "dive", t: dur, dir: pc.dir };
+              g.pendingCatch = null;
+              setTimeout(() => resolveRun(g, rec.y), 220);
+            } else {
+              rec.freeze = 28;
+              rec.catchAnim = { type: "jump", t: dur, dir: pc.dir };
+              g.pendingCatch = null;
               phaseRef.current = GS.RUNNING; setPhase(GS.RUNNING);
+            }
+          }
+        } else {
+          g.ball.x += g.ball.vx; g.ball.y += g.ball.vy; g.ball.flown += 1;
+          g.ball.angle = Math.atan2(g.ball.vy, g.ball.vx) + Math.PI / 2;
+          const prog = Math.min(1, g.ball.flown / g.ball.flightFrames);
+          g.ball.lift = Math.sin(prog * Math.PI) * g.ball.maxLift;
+          Object.entries(g.receivers).forEach(([role, rec]) => stepReceiverTowardBall(rec, recSpeed(role) * 0.92, g.ball.lx, g.ball.ly));
+          Object.values(g.defenders).forEach((def) => { const dx = g.ball.lx - def.x, dy = g.ball.ly - def.y, d = Math.sqrt(dx * dx + dy * dy); if (d > 3) { const ox = def.x; def.x += dx / d * def.speed * 1.05 * GAME_SPEED; def.y += dy / d * def.speed * 1.05 * GAME_SPEED; def.anim = (def.anim || 0) + 0.4; def.moving = true; def.facing = def.x - ox; } });
+          if (prog >= 1) {
+            const lx = g.ball.lx, ly = g.ball.ly;
+            let bestRole = null, bestDist = Infinity;
+            Object.entries(g.receivers).forEach(([role, rec]) => { const dx = rec.x - lx, dy = rec.y - ly, d = Math.sqrt(dx * dx + dy * dy); if (d < bestDist) { bestDist = d; bestRole = role; } });
+            const rr = bestRole ? recRating(bestRole) : 0;
+            const reach = 22 + rr * 36 + (chemistry?.totalBonus || 0) * 18;
+            if (bestRole && bestDist < reach) {
+              const rec = g.receivers[bestRole];
+              const dx = lx - rec.x, dy = ly - rec.y;
+              let nearDef = Infinity;
+              Object.values(g.defenders).forEach((d) => { const x = d.x - lx, y = d.y - ly; nearDef = Math.min(nearDef, Math.sqrt(x * x + y * y)); });
+              const qbR = rf(roster.QB?.rating);
+              const onTarget = 1 - Math.min(1, bestDist / reach);
+              const cov = nearDef < 26 ? 0.48 : nearDef < 48 ? 0.18 : 0;
+              const catchP = Math.max(0.10, Math.min(0.98, 0.34 + rr * 0.42 + qbR * 0.12 + onTarget * 0.22 - cov + (chemistry?.totalBonus || 0) * 0.4));
+              if (Math.random() < catchP) {
+                const offTarget = bestDist > 17;
+                const lateralMiss = Math.abs(dx) > 16;
+                const highMiss = dy < -14 || g.ball.maxLift > 25 && Math.abs(dx) < 26;
+                if (offTarget && lateralMiss) {
+                  g.pendingCatch = { type: "dive", role: bestRole, t: 0, startX: rec.x, startY: rec.y, targetX: lx, targetY: ly, dir: dx >= 0 ? 1 : -1 };
+                  rec.catchAnim = { type: "dive", t: 0, dir: dx >= 0 ? 1 : -1 };
+                } else if (offTarget && highMiss) {
+                  g.pendingCatch = { type: "jump", role: bestRole, t: 0, startX: rec.x, startY: rec.y, targetX: lx, targetY: ly, dir: dx >= 0 ? 1 : -1 };
+                  rec.catchAnim = { type: "jump", t: 0, dir: dx >= 0 ? 1 : -1 };
+                } else {
+                  g.carrier = bestRole; g.ball.inAir = false; g.ball.x = rec.x; g.ball.y = rec.y;
+                  phaseRef.current = GS.RUNNING; setPhase(GS.RUNNING);
+                }
+              } else { g.ball.inAir = false; resolveIncomplete(g); }
             } else { g.ball.inAir = false; resolveIncomplete(g); }
-          } else { g.ball.inAir = false; resolveIncomplete(g); }
+          }
         }
       }
       if (ph === GS.RUNNING) {
@@ -1098,7 +1250,7 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose }) {
       g.OL.forEach((ol) => { const dy = losY - 13; ctx.fillStyle = "#cf3b2c"; ctx.fillRect(ol.x - 8, dy - 9, 16, 18); ctx.fillStyle = "#8e2820"; ctx.fillRect(ol.x - 7, dy - 11, 14, 9); });
       Object.values(g.defenders).forEach((d) => drawPlayer(ctx, d.x, d.y, false, false, "", d.anim || 0, d.moving));
       const showL = isLive || ph === GS.BALL_AIR || ph === GS.RUNNING;
-      Object.entries(g.receivers).forEach(([role, rec]) => drawPlayer(ctx, rec.x, rec.y, true, g.carrier === role && !g.ball.inAir, showL ? role.replace(/\d/, "") : "", rec.anim || 0, rec.moving));
+      Object.entries(g.receivers).forEach(([role, rec]) => drawPlayer(ctx, rec.x, rec.y, true, g.carrier === role && !g.ball.inAir, showL ? role.replace(/\d/, "") : "", rec.anim || 0, rec.moving, rec.catchAnim));
       drawPlayer(ctx, g.qb.x, g.qb.y, true, g.carrier === "qb" && !g.ball.inAir, showL ? "QB" : "", g.qb.anim || 0, g.qb.moving);
       if (g.ball.inAir) {
         ctx.fillStyle = "rgba(0,0,0,0.22)"; ctx.beginPath(); ctx.ellipse(g.ball.x, g.ball.y + 4, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
