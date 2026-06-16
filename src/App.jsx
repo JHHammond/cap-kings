@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { Analytics } from '@vercel/analytics/react'
 
 /*
   CAP KINGS / GO 20-0
@@ -2363,6 +2364,7 @@ export default function CapKings() {
       )}
 
       {phase === "draft" && <footer className="bottom">{pickCount === 5 ? <div className="line"><b>PWR {teamPower}</b><span>O/U {projLine} wins</span></div> : <div className="prog">{[0, 1, 2, 3, 4].map((c) => <i key={c} className={c in picks ? "fill" : ""} />)}<span>{pickCount}/5</span></div>}<button className={"sim" + (pickCount === 5 ? " ready" : "")} disabled={pickCount < 5} onClick={startSim}>{pickCount === 5 ? "Simulate Season ▶" : `Pick ${5 - pickCount} more`}</button></footer>}
+    <Analytics/>
     </div>
   );
 }
