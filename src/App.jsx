@@ -609,6 +609,9 @@ const LOS_Y = 620;
 const PPY = 15;
 const P_HALF = 11;
 const GAME_SPEED = 0.8; // 20% slower player movement across the Cap Bowl mini-game
+const EZ_DEPTH = 8;                 // yards of end zone we draw
+const FIELD_TOP_YARD = 100 + EZ_DEPTH;  // back of attacking end zone
+const FIELD_BOT_YARD = -EZ_DEPTH;       // back of your own end zone
 
 const DEFAULT_CAP_ROSTER = {
   QB: { name: "Patrick Mahomes", rating: 99 },
@@ -801,39 +804,59 @@ function drawBall(ctx, x, y, angle) {
   ctx.restore();
 }
 
-function drawField(ctx, ballYard, camY = 0) {
-  ctx.fillStyle = "#236f23";
-  ctx.fillRect(0, 0, CW, CH);
-  ctx.save(); ctx.translate(0, camY);
-  const margin = Math.abs(camY) / PPY + 6;
-  const topYard = Math.ceil(ballYard + LOS_Y / PPY) + 5 + margin;
-  const botYard = Math.floor(ballYard + (LOS_Y - CH) / PPY) - 5 - margin;
+const EZ_DEPTH = 8;
+const FIELD_TOP_YARD = 100 + EZ_DEPTH;  // back of attacking end zone
+const FIELD_BOT_YARD = -EZ_DEPTH;       // back of your own end zone
 
-  for (let fy = botYard; fy <= topYard; fy++) {
-    if (fy % 10 !== 0) continue;
-    const y0 = yardToScreenY(fy, ballYard);
-    const y1 = yardToScreenY(fy + 10, ballYard);
-    if ((Math.floor(fy / 10)) % 2 === 0) {
-      ctx.fillStyle = "#277a27";
-      ctx.fillRect(SIDE_L, y1, SIDE_R - SIDE_L, y0 - y1);
-    }
+// Stop the camera at the back of either end zone (no empty space past the grass).
+function clampCam(camY, ballYard) {
+  const camMin = -yardToScreenY(FIELD_TOP_YARD, ballYard);
+  const camMax = CH - yardToScreenY(FIELD_BOT_YARD, ballYard);
+  return Math.max(camMin, Math.min(camMax, camY));
+}
+
+function drawField(ctx, ballYard, camY = 0) {
+  // 1) Whole canvas = stadium stands (so anything not grass reads as crowd)
+  drawStandStrip(ctx, 0, CW);
+
+  ctx.save();
+  ctx.translate(0, camY);
+
+  // y-bounds of the playable grass (between the two end-zone backs)
+  const topY = yardToScreenY(FIELD_TOP_YARD, ballYard); // higher on screen (smaller y)
+  const botY = yardToScreenY(FIELD_BOT_YARD, ballYard); // lower on screen (larger y)
+
+  // 2) Grass only between the goal-line backs
+  ctx.fillStyle = "#236f23";
+  ctx.fillRect(SIDE_L, topY, SIDE_R - SIDE_L, botY - topY);
+
+  // alternating 10-yd bands (clipped to grass)
+  for (let fy = -10; fy <= 110; fy += 10) {
+    if ((Math.floor(fy / 10)) % 2 !== 0) continue;
+    let y0 = yardToScreenY(fy, ballYard);
+    let y1 = yardToScreenY(fy + 10, ballYard);
+    const a = Math.max(topY, Math.min(botY, y1));
+    const b = Math.max(topY, Math.min(botY, y0));
+    if (b > a) { ctx.fillStyle = "#277a27"; ctx.fillRect(SIDE_L, a, SIDE_R - SIDE_L, b - a); }
   }
 
-  const ez0 = yardToScreenY(100, ballYard);
+  // end zones
+  const ezOpp = yardToScreenY(100, ballYard);
   ctx.fillStyle = "#1a4d8f";
-  ctx.fillRect(SIDE_L, ez0 - PPY * 10, SIDE_R - SIDE_L, PPY * 10);
+  ctx.fillRect(SIDE_L, topY, SIDE_R - SIDE_L, ezOpp - topY);
   const ezOwn = yardToScreenY(0, ballYard);
   ctx.fillStyle = "#8f1a1a";
-  ctx.fillRect(SIDE_L, ezOwn, SIDE_R - SIDE_L, PPY * 10);
+  ctx.fillRect(SIDE_L, ezOwn, SIDE_R - SIDE_L, botY - ezOwn);
 
+  // yard lines + numbers
   ctx.textAlign = "center";
-  for (let fy = Math.max(0, botYard); fy <= Math.min(100, topYard); fy++) {
-    if (fy % 5 !== 0) continue;
+  for (let fy = 5; fy <= 95; fy += 5) {
     const y = yardToScreenY(fy, ballYard);
+    if (y < topY || y > botY) continue;
     ctx.strokeStyle = "rgba(255,255,255,0.7)";
     ctx.lineWidth = fy % 10 === 0 ? 2 : 1;
     ctx.beginPath(); ctx.moveTo(SIDE_L, y); ctx.lineTo(SIDE_R, y); ctx.stroke();
-    if (fy % 10 === 0 && fy > 0 && fy < 100) {
+    if (fy % 10 === 0) {
       const label = fy <= 50 ? fy : 100 - fy;
       ctx.fillStyle = "rgba(255,255,255,0.65)";
       ctx.font = "bold 20px monospace";
@@ -842,23 +865,70 @@ function drawField(ctx, ballYard, camY = 0) {
     }
   }
 
-  ctx.fillStyle = "rgba(255,255,255,0.42)";
-  ctx.font = "bold 26px monospace";
-  ctx.fillText("END ZONE", CENTER_X, ez0 - PPY * 4);
-  ctx.strokeStyle = "rgba(255,255,255,0.45)";
-  ctx.lineWidth = 1;
-  for (let fy = Math.max(0, botYard); fy <= Math.min(100, topYard); fy++) {
+  // END ZONE label (only if on screen)
+  const ezTextY = ezOpp - PPY * 4;
+  if (ezTextY > topY && ezTextY < botY) {
+    ctx.fillStyle = "rgba(255,255,255,0.42)";
+    ctx.font = "bold 26px monospace";
+    ctx.fillText("END ZONE", CENTER_X, ezTextY);
+  }
+
+  // hash marks
+  ctx.strokeStyle = "rgba(255,255,255,0.45)"; ctx.lineWidth = 1;
+  for (let fy = 1; fy <= 99; fy++) {
     const y = yardToScreenY(fy, ballYard);
+    if (y < topY || y > botY) continue;
     ctx.beginPath(); ctx.moveTo(CENTER_X - 30, y); ctx.lineTo(CENTER_X - 22, y); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(CENTER_X + 22, y); ctx.lineTo(CENTER_X + 30, y); ctx.stroke();
   }
-  ctx.strokeStyle = "#fff";
-  ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(SIDE_L, -300); ctx.lineTo(SIDE_L, CH + 300); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(SIDE_R, -300); ctx.lineTo(SIDE_R, CH + 300); ctx.stroke();
-  ctx.restore();
 
-  drawStands(ctx);
+  // sidelines + goal-line boundaries (so grass clearly ends)
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(SIDE_L, topY); ctx.lineTo(SIDE_L, botY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(SIDE_R, topY); ctx.lineTo(SIDE_R, botY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(SIDE_L, topY); ctx.lineTo(SIDE_R, topY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(SIDE_L, botY); ctx.lineTo(SIDE_R, botY); ctx.stroke();
+
+  ctx.restore();
+}
+
+// One call paints BOTH sideline stands. Fans are pixel rows on tiered concrete.
+function drawStandStrip(ctx) {
+  // dark stadium base across the whole canvas first (covers any gaps)
+  ctx.fillStyle = "#23262e";
+  ctx.fillRect(0, 0, CW, CH);
+
+  const shirts = ["#e74c3c", "#3498db", "#f1c40f", "#ecf0f1", "#e67e22", "#9b59b6", "#1abc9c", "#fff"];
+  const skin = ["#e6bd84", "#c98a52", "#8d5524", "#f1c27d"];
+
+  [[0, SIDE_L, 1], [SIDE_R, CW, -1]].forEach(([x0, x1, dir]) => {
+    const w = x1 - x0;
+    const grd = ctx.createLinearGradient(x0, 0, x1, 0);
+    grd.addColorStop(0, "#3a3f4a");
+    grd.addColorStop(1, "#23262e");
+    ctx.fillStyle = grd;
+    ctx.fillRect(x0, 0, w, CH);
+
+    const rowH = 9;
+    const cols = Math.max(2, Math.floor((w - 4) / 7));
+    for (let ry = 0; ry * rowH < CH; ry++) {
+      const fy = ry * rowH + 4;
+      for (let cx = 0; cx < cols; cx++) {
+        const seed = (ry * 31 + cx * 17) % 97;
+        const fx = x0 + 3 + cx * 7 + (ry % 2) * 2;
+        if (fx > x1 - 4) continue;
+        ctx.fillStyle = shirts[seed % shirts.length];
+        ctx.fillRect(fx, fy + 3, 5, 5);           // shirt
+        ctx.fillStyle = skin[(seed >> 2) % skin.length];
+        ctx.fillRect(fx + 1, fy, 3, 3);           // head
+      }
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.fillRect(x0, fy + 8, w, 1);             // bleacher line
+    }
+    // shadow wall at the field edge
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(dir === 1 ? x1 - 3 : x0, 0, 3, CH);
+  });
 }
 
 // Stadium stands down both sidelines: tiered concrete with rows of fan pixels.
@@ -1119,10 +1189,15 @@ function stepCarrier(g, roster) {
   const vy = Math.sqrt(Math.max(0.16, speed * speed - vx * vx));
   p.x += vx; p.y -= vy;
   p.x = Math.max(SIDE_L + 6, Math.min(SIDE_R - 6, p.x));
+  const goalY = yardToScreenY(100, g.ballYard);
+  if (p.y <= goalY) {
+    p.y = goalY; g.ball.x = p.x; g.ball.y = p.y;
+    g.camTargetY = (CH * 0.58) - p.y;
+    return "touchdown";
+  }
   p.anim = (p.anim || 0) + 0.45; p.moving = true; p.facing = vx;
   g.ball.x = p.x; g.ball.y = p.y;
   g.camTargetY = (CH * 0.58) - p.y;
-  if (p.y <= yardToScreenY(100, g.ballYard)) return "touchdown";
   Object.values(g.defenders).forEach((d) => {
     const dx = p.x - d.x, dy = p.y - 10 - d.y, dd = Math.sqrt(dx * dx + dy * dy);
     const dsp = (d.pursuit || 2.6) * GAME_SPEED;
