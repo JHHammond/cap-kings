@@ -1743,7 +1743,7 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose, muted = fa
     G.current = {
       tick: 0, ballYard, play, qb: { x: form.QB.x, y: form.QB.y }, OL: form.OL,
       receivers: { WR1: makeReceiver(form.WR1.x, form.WR1.y, absWp("WR1"), play.id === "curls" ? 42 : 0), WR2: makeReceiver(form.WR2.x, form.WR2.y, absWp("WR2"), play.id === "curls" ? 42 : 0), TE: makeReceiver(form.TE.x, form.TE.y, absWp("TE"), play.id === "curls" ? 42 : 0), RB: makeReceiver(form.RB.x, form.RB.y, absWp("RB"), play.id === "curls" ? 26 : 0) },
-      defenders: { CB1: { ...form.DEF.CB1, cover: "WR1", pursuit: 2.7, anim: 0, moving: false }, CB2: { ...form.DEF.CB2, cover: "WR2", pursuit: 2.7, anim: 0, moving: false }, LB1: { ...form.DEF.LB1, cover: "TE", pursuit: 2.5, anim: 0, moving: false }, LB2: { ...form.DEF.LB2, cover: "RB", pursuit: 2.5, anim: 0, moving: false }, S: { ...form.DEF.S, cover: "S", pursuit: 2.8, anim: 0, moving: false } },
+      defenders: { CB1: { ...form.DEF.CB1, cover: "WR1", pursuit: 2.7, anim: 0, moving: false }, CB2: { ...form.DEF.CB2, cover: "WR2", pursuit: 2.7, anim: 0, moving: false }, LB1: { ...form.DEF.LB1, cover: "TE", pursuit: 2.5, anim: 0, moving: false }, LB2: { ...form.DEF.LB2, cover: "RB", pursuit: 2.5, anim: 0, moving: false }, S: { ...form.DEF.S, cover: "S", pursuit: 2.8, anim: 0, moving: false, startY: form.DEF.S.y, range: 0.78 + Math.random() * 0.42 } },
       ball: { x: form.QB.x, y: form.QB.y, vx: 0, vy: 0, angle: 0, inAir: false },
       carrier: "qb", thrownTo: null, pendingCatch: null, camY: 0, camTargetY: 0,
       run: false, runStart: 0, runGap: 0, reactFrames: 0,
@@ -1795,7 +1795,30 @@ function CapBowlGame({ roster: rosterInput, chemistry, onWin, onLose, muted = fa
       if (isLive) {
         Object.entries(g.receivers).forEach(([role, rec]) => stepReceiver(rec, recSpeed(role), bounds));
         Object.values(g.defenders).forEach((def) => {
-          const cover = def.cover === "S" ? (() => { let dY = Infinity, key = "WR1"; Object.entries(g.receivers).forEach(([k, r]) => { if (r.y < dY) { dY = r.y; key = k; } }); return key; })() : def.cover;
+          if (def.cover === "S") {
+            // Free safety: play center field over the top. Stay deeper than the
+            // deepest receiver by a cushion and shade toward him, keeping everyone
+            // in front. A per-play "range" means he sometimes gets beaten deep.
+            let deepest = null, deepY = Infinity, second = null, secY = Infinity;
+            Object.values(g.receivers).forEach((r) => {
+              if (r.y < deepY) { secY = deepY; second = deepest; deepY = r.y; deepest = r; }
+              else if (r.y < secY) { secY = r.y; second = r; }
+            });
+            const range = def.range || 1;
+            const cushion = 50 * range;
+            const sSpeed = (1.1 + 0.86 * 1.1) * GAME_SPEED * range; // fixed coverage speed; fast WRs can run past a short-range safety
+            let aimX = deepest ? deepest.x : CENTER_X;
+            if (deepest && second && secY - deepY < 70) aimX = (deepest.x + second.x) / 2; // split two deep threats
+            const targetX = CENTER_X + (aimX - CENTER_X) * 0.6;
+            const baseY = def.startY != null ? def.startY : def.y;
+            let targetY = Math.min(baseY, (deepest ? deepest.y : LOS_Y) - cushion); // hold depth, then bail over the top
+            targetY = Math.max(bounds.backY + 14, targetY);
+            const dx = targetX - def.x, dy = targetY - def.y, d = Math.sqrt(dx * dx + dy * dy);
+            if (d > 2) { const ox = def.x; const sp = Math.min(sSpeed, d); def.x += dx / d * sp; def.y += dy / d * sp; def.anim = (def.anim || 0) + 0.4; def.moving = true; def.facing = def.x - ox; } else def.moving = false;
+            def.y = Math.max(bounds.backY + 10, def.y);
+            return;
+          }
+          const cover = def.cover;
           const target = g.receivers[cover] || g.receivers.WR1;
           const rr = recRating(cover);
           const dSpeed = recSpeed(cover) * (0.80 + (1 - rr) * 0.16);
